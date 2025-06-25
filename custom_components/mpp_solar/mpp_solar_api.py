@@ -1,10 +1,11 @@
-"""API for MPP Solar devices."""
+"""API for MPP Solar devices - Optimized for Raspberry Pi."""
 from __future__ import annotations
 
 import logging
 import struct
 import time
 from typing import Any
+import os
 
 import serial
 
@@ -30,6 +31,26 @@ class MPPSolarAPI:
         self.device_path = device_path
         self.protocol = protocol
         self._device = None
+        self._connection_type = self._detect_connection_type(device_path)
+
+    def _detect_connection_type(self, device_path: str) -> str:
+        """Detect connection type from device path."""
+        if device_path.startswith("socket://"):
+            return "socket"
+        elif "hidraw" in device_path:
+            return "hidraw"
+        elif "ttyUSB" in device_path or "serial" in device_path:
+            return "serial"
+        else:
+            # Try to detect based on actual device
+            if os.path.exists(device_path):
+                # Check if it's a hidraw device
+                try:
+                    with open(device_path, 'rb') as f:
+                        return "hidraw"
+                except:
+                    return "serial"
+            return "unknown"
 
     def _calculate_crc(self, command: str) -> bytes:
         """Calculate CRC for PI30 protocol."""
@@ -45,58 +66,135 @@ class MPPSolarAPI:
 
     def _send_command(self, command: str) -> str:
         """Send command to device and return response."""
-        if self._device is None:
-            # Try HID interface first
+        if self._connection_type == "hidraw":
+            return self._send_hidraw_command(command)
+        elif self._connection_type == "serial":
+            return self._send_serial_command(command)
+        else:
+            # Try both methods
             try:
-                with open(self.device_path, 'rb+') as device:
-                    # PI30 protocol: command + CRC + \r
-                    crc = self._calculate_crc(command)
-                    full_command = command.encode() + crc + b'\r'
-                    
-                    # Send command
-                    device.write(full_command)
-                    device.flush()
-                    
-                    # Read response
-                    time.sleep(0.1)  # Give device time to respond
-                    response = device.read(8192)  # Read up to 8KB
-                    
-                    if response:
-                        # Parse response (should start with '(' and end with CRC + '\r')
-                        if response.startswith(b'(') and len(response) > 3:
-                            # Remove leading '(' and trailing CRC + '\r'
-                            data = response[1:-3].decode('utf-8', errors='ignore')
-                            return data
-                    
-                    return ""
-            except Exception as e:
-                _LOGGER.error("HID communication failed: %s", e)
-                # Fallback to serial communication
-                try:
-                    with serial.Serial(self.device_path, 2400, timeout=2) as ser:
-                        crc = self._calculate_crc(command)
-                        full_command = command.encode() + crc + b'\r'
-                        
-                        ser.write(full_command)
-                        ser.flush()
-                        
-                        response = ser.read(1024)
-                        if response and response.startswith(b'('):
-                            data = response[1:-3].decode('utf-8', errors='ignore')
-                            return data
-                        
-                        return ""
-                except Exception as e2:
-                    _LOGGER.error("Serial communication also failed: %s", e2)
-                    raise
+                return self._send_hidraw_command(command)
+            except:
+                return self._send_serial_command(command)
+
+    def _send_hidraw_command(self, command: str) -> str:
+        """Send command via hidraw interface (for Raspberry Pi)."""
+        try:
+            # For Raspberry Pi, we need to handle hidraw differently
+            with open(self.device_path, 'r+b', buffering=0) as device:
+                # Prepare command
+                crc = self._calculate_crc(command)
+                full_command = command.encode() + crc + b'\r'
+                
+                # For hidraw on RPi, we may need to pad the command
+                if len(full_command) < 8:
+                    full_command = full_command.ljust(8, b'\x00')
+                
+                # Send command
+                device.write(full_command)
+                device.flush()
+                
+                # Give device time to respond
+                time.sleep(0.2)
+                
+                # Read response (may need multiple reads on RPi)
+                response = b''
+                max_attempts = 10
+                while max_attempts > 0:
+                    chunk = device.read(512)
+                    if chunk:
+                        response += chunk
+                        if b'\r' in response:
+                            break
+                    else:
+                        time.sleep(0.1)
+                    max_attempts -= 1
+                
+                if response and response.startswith(b'('):
+                    # Remove leading '(' and trailing CRC + '\r'
+                    end_idx = response.find(b'\r')
+                    if end_idx > 0:
+                        data = response[1:end_idx-2].decode('utf-8', errors='ignore')
+                        return data
+                
+                return ""
+                
+        except Exception as e:
+            _LOGGER.error("HID communication failed: %s", e)
+            raise
+
+    def _send_serial_command(self, command: str) -> str:
+        """Send command via serial interface."""
+        try:
+            # Serial parameters for MPP Solar
+            with serial.Serial(
+                port=self.device_path,
+                baudrate=2400,
+                bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+                timeout=2,
+                write_timeout=2
+            ) as ser:
+                # Clear buffers
+                ser.reset_input_buffer()
+                ser.reset_output_buffer()
+                
+                # Send command
+                crc = self._calculate_crc(command)
+                full_command = command.encode() + crc + b'\r'
+                
+                ser.write(full_command)
+                ser.flush()
+                
+                # Read response
+                response = b''
+                start_time = time.time()
+                while time.time() - start_time < 2:
+                    if ser.in_waiting:
+                        chunk = ser.read(ser.in_waiting)
+                        response += chunk
+                        if b'\r' in response:
+                            break
+                    else:
+                        time.sleep(0.05)
+                
+                if response and response.startswith(b'('):
+                    end_idx = response.find(b'\r')
+                    if end_idx > 0:
+                        data = response[1:end_idx-2].decode('utf-8', errors='ignore')
+                        return data
+                
+                return ""
+                
+        except Exception as e:
+            _LOGGER.error("Serial communication failed: %s", e)
+            raise
 
     def test_connection(self) -> bool:
         """Test connection to device."""
         try:
+            # Try simple command first
             response = self._send_command("QID")
+            if response and len(response) > 0:
+                return True
+                
+            # Try another command
+            response = self._send_command("QMOD")
             return bool(response and len(response) > 0)
+            
         except Exception as e:
             _LOGGER.error("Connection test failed: %s", e)
+            # Try to set permissions if it's a permission error
+            if "Permission denied" in str(e) and os.path.exists(self.device_path):
+                try:
+                    os.chmod(self.device_path, 0o666)
+                    _LOGGER.info(f"Fixed permissions for {self.device_path}")
+                    # Retry
+                    response = self._send_command("QID")
+                    return bool(response and len(response) > 0)
+                except:
+                    pass
             return False
 
     def get_device_info(self) -> dict[str, Any]:
