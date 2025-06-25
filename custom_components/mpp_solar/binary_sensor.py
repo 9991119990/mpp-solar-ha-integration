@@ -1,6 +1,7 @@
 """Binary sensor platform for MPP Solar integration."""
 from __future__ import annotations
 
+import logging
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
@@ -13,8 +14,9 @@ from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
 )
 
-from .const import DOMAIN, BINARY_SENSOR_MAPPING, WARNING_MAPPING
+from .const import DOMAIN
 
+_LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -22,50 +24,60 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the binary sensor platform."""
+    _LOGGER.info("🏗️ Setting up MPP Solar binary sensors")
+    
     coordinator = hass.data[DOMAIN][config_entry.entry_id]["coordinator"]
     api = hass.data[DOMAIN][config_entry.entry_id]["api"]
     
     # Get device info
-    device_info = await hass.async_add_executor_job(api.get_device_info)
+    try:
+        device_info = await hass.async_add_executor_job(api.get_device_info)
+    except Exception as e:
+        _LOGGER.warning("⚠️ Could not get device info: %s", e)
+        device_info = {"serial_number": "unknown", "firmware_version": "Unknown"}
     
     entities = []
     
     # Create binary sensors for all boolean data
     if coordinator.data:
         for key, value_info in coordinator.data.items():
+            # Handle different data formats
+            unit = None
+            value = None
+            
             if isinstance(value_info, tuple) and len(value_info) >= 2:
                 value, unit = value_info[0], value_info[1]
+            elif isinstance(value_info, bool):
+                value = value_info
+                unit = "bool"
+            
+            # Only create binary sensors for boolean values
+            if unit == "bool" or isinstance(value, bool):
+                # Get friendly name
+                friendly_name = key.replace("_", " ").title()
                 
-                # Only create binary sensors for boolean values
-                if unit == "bool":
-                    # Get friendly name from mapping or create from key
-                    friendly_name = (
-                        BINARY_SENSOR_MAPPING.get(key) or 
-                        WARNING_MAPPING.get(key) or 
-                        key.replace("_", " ").title()
+                # Determine device class
+                device_class = None
+                if any(word in key.lower() for word in ["fault", "warning", "alarm"]):
+                    device_class = BinarySensorDeviceClass.PROBLEM
+                elif any(word in key.lower() for word in ["charging", "load", "switched"]):
+                    device_class = BinarySensorDeviceClass.RUNNING
+                
+                entities.append(
+                    MPPSolarBinarySensor(
+                        coordinator=coordinator,
+                        key=key,
+                        name=friendly_name,
+                        device_info=device_info,
+                        device_class=device_class,
                     )
-                    
-                    # Determine device class
-                    device_class = None
-                    if any(word in key.lower() for word in ["fault", "warning", "alarm"]):
-                        device_class = BinarySensorDeviceClass.PROBLEM
-                    elif any(word in key.lower() for word in ["charging", "load", "switched"]):
-                        device_class = BinarySensorDeviceClass.RUNNING
-                    elif any(word in key.lower() for word in ["buzzer", "lcd"]):
-                        device_class = BinarySensorDeviceClass.SOUND if "buzzer" in key.lower() else None
-                    
-                    entities.append(
-                        MPPSolarBinarySensor(
-                            coordinator=coordinator,
-                            key=key,
-                            name=friendly_name,
-                            device_info=device_info,
-                            device_class=device_class,
-                        )
-                    )
+                )
     
-    async_add_entities(entities)
-
+    if entities:
+        async_add_entities(entities)
+        _LOGGER.info("🎉 Successfully added %d binary sensor entities", len(entities))
+    else:
+        _LOGGER.info("📭 No binary sensors created (no boolean data found)")
 
 class MPPSolarBinarySensor(CoordinatorEntity, BinarySensorEntity):
     """Representation of an MPP Solar binary sensor."""
@@ -110,37 +122,31 @@ class MPPSolarBinarySensor(CoordinatorEntity, BinarySensorEntity):
             return "mdi:battery-charging"
         elif "load" in key_lower:
             return "mdi:power-plug"
-        elif "buzzer" in key_lower:
-            return "mdi:volume-high"
-        elif "lcd" in key_lower:
-            return "mdi:monitor"
-        elif "switch" in key_lower:
-            return "mdi:toggle-switch"
-        elif "restart" in key_lower:
-            return "mdi:restart"
-        elif "bypass" in key_lower:
-            return "mdi:arrow-decision"
-        elif "power_saving" in key_lower:
-            return "mdi:leaf"
         else:
             return "mdi:checkbox-marked-circle"
 
     @property
     def is_on(self) -> bool | None:
         """Return true if the binary sensor is on."""
-        if self.coordinator.data and self._key in self.coordinator.data:
-            value_info = self.coordinator.data[self._key]
-            if isinstance(value_info, tuple) and len(value_info) >= 1:
-                value = value_info[0]
-                if isinstance(value, bool):
-                    return value
-                elif isinstance(value, str):
-                    return value.lower() in ["on", "enabled", "true", "1"]
-                elif isinstance(value, int):
-                    return bool(value)
+        if not self.coordinator.data or self._key not in self.coordinator.data:
+            return None
+            
+        value_info = self.coordinator.data[self._key]
+        
+        if isinstance(value_info, tuple) and len(value_info) >= 1:
+            value = value_info[0]
+        else:
+            value = value_info
+            
+        if isinstance(value, bool):
+            return value
+        elif isinstance(value, str):
+            return value.lower() in ["on", "enabled", "true", "1"]
+        elif isinstance(value, int):
+            return bool(value)
         return None
 
     @property
     def available(self) -> bool:
         """Return if entity is available."""
-        return self.coordinator.last_update_success and self.is_on is not None
+        return self.coordinator.last_update_success
