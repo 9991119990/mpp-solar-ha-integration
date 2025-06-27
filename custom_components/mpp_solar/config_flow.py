@@ -28,7 +28,12 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
         vol.Required("device_path", default="/dev/hidraw2"): str,
         vol.Optional("protocol", default=DEFAULT_PROTOCOL): vol.In(["PI30", "PI16", "PI17", "PI18"]),
         vol.Optional("name", default="MPP Solar Inverter"): str,
-        vol.Optional("mqtt_host", default=DEFAULT_MQTT_HOST): str,
+    }
+)
+
+STEP_MQTT_DATA_SCHEMA = vol.Schema(
+    {
+        vol.Optional("mqtt_host", default=""): str,
         vol.Optional("mqtt_port", default=DEFAULT_MQTT_PORT): int,
         vol.Optional("mqtt_username", default=""): str,
         vol.Optional("mqtt_password", default=""): str,
@@ -77,10 +82,14 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    def __init__(self):
+        """Initialize config flow."""
+        self._device_config = {}
+
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle the initial step."""
+        """Handle the initial step - device configuration."""
         errors: dict[str, str] = {}
         
         if user_input is not None:
@@ -91,7 +100,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 await self.async_set_unique_id(info["serial_number"])
                 self._abort_if_unique_id_configured()
                 
-                return self.async_create_entry(title=info["title"], data=user_input)
+                # Store device config and move to MQTT step
+                self._device_config = user_input.copy()
+                self._device_config["title"] = info["title"]
+                
+                return await self.async_step_mqtt()
+                
             except CannotConnect:
                 errors["base"] = "cannot_connect"
             except InvalidAuth:
@@ -102,6 +116,28 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors
+        )
+
+    async def async_step_mqtt(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle MQTT configuration step."""
+        if user_input is not None:
+            # Combine device and MQTT config
+            final_config = self._device_config.copy()
+            final_config.update(user_input)
+            
+            return self.async_create_entry(
+                title=final_config["title"], 
+                data=final_config
+            )
+
+        return self.async_show_form(
+            step_id="mqtt", 
+            data_schema=STEP_MQTT_DATA_SCHEMA,
+            description_placeholders={
+                "device": self._device_config.get("name", "MPP Solar")
+            }
         )
 
 
