@@ -45,6 +45,8 @@ class MPPSolarAPI:
 
     def _send_command(self, command: str) -> str:
         """Send command to device and return response."""
+        _LOGGER.debug("Sending command: %s to device %s", command, self.device_path)
+        
         if self._device is None:
             # Try HID interface first
             try:
@@ -52,6 +54,7 @@ class MPPSolarAPI:
                     # PI30 protocol: command + CRC + \r
                     crc = self._calculate_crc(command)
                     full_command = command.encode() + crc + b'\r'
+                    _LOGGER.debug("Full command bytes (%d): %s", len(full_command), full_command.hex())
                     
                     # Send command
                     device.write(full_command)
@@ -60,19 +63,32 @@ class MPPSolarAPI:
                     # Read response
                     time.sleep(0.1)  # Give device time to respond
                     response = device.read(8192)  # Read up to 8KB
+                    _LOGGER.debug("Raw response (%d bytes): %s", len(response), response.hex() if response else "None")
                     
                     if response:
                         # Parse response (should start with '(' and end with CRC + '\r')
                         if response.startswith(b'(') and len(response) > 3:
                             # Remove leading '(' and trailing CRC + '\r'
                             data = response[1:-3].decode('utf-8', errors='ignore')
+                            _LOGGER.debug("Parsed response for %s: %s", command, data)
                             return data
+                        else:
+                            _LOGGER.warning("Invalid response format for command %s", command)
+                    else:
+                        _LOGGER.warning("No response received for command %s", command)
                     
                     return ""
+            except FileNotFoundError:
+                _LOGGER.error("Device not found: %s", self.device_path)
+                raise
+            except PermissionError:
+                _LOGGER.error("Permission denied accessing device: %s (try: sudo chmod 666 %s)", self.device_path, self.device_path)
+                raise
             except Exception as e:
                 _LOGGER.error("HID communication failed: %s", e)
                 # Fallback to serial communication
                 try:
+                    _LOGGER.info("Trying fallback serial communication...")
                     with serial.Serial(self.device_path, 2400, timeout=2) as ser:
                         crc = self._calculate_crc(command)
                         full_command = command.encode() + crc + b'\r'
@@ -83,6 +99,7 @@ class MPPSolarAPI:
                         response = ser.read(1024)
                         if response and response.startswith(b'('):
                             data = response[1:-3].decode('utf-8', errors='ignore')
+                            _LOGGER.debug("Serial response for %s: %s", command, data)
                             return data
                         
                         return ""
@@ -92,9 +109,15 @@ class MPPSolarAPI:
 
     def test_connection(self) -> bool:
         """Test connection to device."""
+        _LOGGER.info("Testing connection to MPP Solar inverter at %s", self.device_path)
         try:
             response = self._send_command("QID")
-            return bool(response and len(response) > 0)
+            if response and len(response) > 0:
+                _LOGGER.info("Connection test successful - device serial: %s", response.strip())
+                return True
+            else:
+                _LOGGER.warning("Connection test failed - no response from device")
+                return False
         except Exception as e:
             _LOGGER.error("Connection test failed: %s", e)
             return False
@@ -215,32 +238,63 @@ class MPPSolarAPI:
 
     def get_all_data(self) -> dict[str, Any]:
         """Get all available data from the device."""
+        _LOGGER.info("Starting data collection from MPP Solar inverter")
         all_data = {}
+        successful_commands = 0
         
         # Get QPIGS data (main status)
         try:
+            _LOGGER.debug("Requesting QPIGS data (main status)")
             qpigs_response = self._send_command("QPIGS")
             if qpigs_response:
                 qpigs_data = self._parse_qpigs(qpigs_response)
                 all_data.update(qpigs_data)
+                successful_commands += 1
+                _LOGGER.debug("QPIGS returned %d values", len(qpigs_data))
+            else:
+                _LOGGER.warning("QPIGS command returned no data")
         except Exception as e:
             _LOGGER.error("Failed to get QPIGS data: %s", e)
         
         # Get warning status
         try:
+            _LOGGER.debug("Requesting QPIWS data (warning status)")
             qpiws_response = self._send_command("QPIWS")
             if qpiws_response:
                 qpiws_data = self._parse_qpiws(qpiws_response)
                 all_data.update(qpiws_data)
+                successful_commands += 1
+                _LOGGER.debug("QPIWS returned %d values", len(qpiws_data))
+            else:
+                _LOGGER.warning("QPIWS command returned no data")
         except Exception as e:
             _LOGGER.error("Failed to get QPIWS data: %s", e)
         
         # Get device mode
         try:
+            _LOGGER.debug("Requesting QMOD data (device mode)")
             mode_response = self._send_command("QMOD")
             if mode_response:
                 all_data["device_mode"] = (mode_response.strip(), "")
+                successful_commands += 1
+                _LOGGER.debug("QMOD returned: %s", mode_response.strip())
+            else:
+                _LOGGER.warning("QMOD command returned no data")
         except Exception as e:
             _LOGGER.error("Failed to get device mode: %s", e)
+        
+        _LOGGER.info("Data collection completed: %d/3 commands successful, %d total values retrieved", 
+                    successful_commands, len(all_data))
+        
+        # Log key readings for monitoring
+        if all_data:
+            key_readings = {}
+            for key in ['ac_output_voltage', 'battery_voltage', 'pv_input_voltage', 'ac_output_active_power', 'battery_capacity']:
+                if key in all_data:
+                    value, unit = all_data[key]
+                    key_readings[key] = f"{value} {unit}"
+            
+            if key_readings:
+                _LOGGER.info("Key readings: %s", key_readings)
         
         return all_data
