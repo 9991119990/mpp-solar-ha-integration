@@ -89,6 +89,9 @@ class MPPSolarMQTTPublisher:
             return
 
         try:
+            _LOGGER.debug("Publishing %d values to MQTT broker %s:%s", len(data), self.host, self.port)
+            published_count = 0
+            
             # Publish individual sensor values
             for key, value in data.items():
                 if value is not None:
@@ -98,6 +101,7 @@ class MPPSolarMQTTPublisher:
                     await asyncio.get_event_loop().run_in_executor(
                         None, self.client.publish, topic, payload, 0, True
                     )
+                    published_count += 1
                     
             # Publish complete data as JSON
             json_topic = f"{self.topic_prefix}/{device_name}/all"
@@ -107,7 +111,8 @@ class MPPSolarMQTTPublisher:
                 None, self.client.publish, json_topic, json_payload, 0, True
             )
             
-            _LOGGER.debug("Published %d values to MQTT", len(data))
+            _LOGGER.info("Successfully published %d individual values + 1 JSON message to MQTT (topics: %s/{device_name}/...)", 
+                        published_count, self.topic_prefix)
             
         except Exception as err:
             _LOGGER.error("Error publishing to MQTT: %s", err)
