@@ -12,7 +12,13 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
 
-from .const import DOMAIN, DEFAULT_PROTOCOL
+from .const import (
+    DOMAIN, 
+    DEFAULT_PROTOCOL, 
+    DEFAULT_MQTT_HOST, 
+    DEFAULT_MQTT_PORT, 
+    DEFAULT_MQTT_TOPIC_PREFIX
+)
 from .mpp_solar_api import MPPSolarAPI
 
 _LOGGER = logging.getLogger(__name__)
@@ -22,6 +28,11 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
         vol.Required("device_path", default="/dev/hidraw2"): str,
         vol.Optional("protocol", default=DEFAULT_PROTOCOL): vol.In(["PI30", "PI16", "PI17", "PI18"]),
         vol.Optional("name", default="MPP Solar Inverter"): str,
+        vol.Optional("mqtt_host", default=DEFAULT_MQTT_HOST): str,
+        vol.Optional("mqtt_port", default=DEFAULT_MQTT_PORT): int,
+        vol.Optional("mqtt_username", default=""): str,
+        vol.Optional("mqtt_password", default=""): str,
+        vol.Optional("mqtt_topic_prefix", default=DEFAULT_MQTT_TOPIC_PREFIX): str,
     }
 )
 

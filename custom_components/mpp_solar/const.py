@@ -6,6 +6,11 @@ DOMAIN = "mpp_solar"
 DEFAULT_PROTOCOL = "PI30"
 DEFAULT_UPDATE_INTERVAL = 30
 
+# MQTT Configuration
+DEFAULT_MQTT_HOST = "localhost"
+DEFAULT_MQTT_PORT = 1883
+DEFAULT_MQTT_TOPIC_PREFIX = "mpp_solar"
+
 # Commands to monitor
 COMMANDS_TO_MONITOR = [
     "QPIGS",  # General status
